@@ -1,0 +1,394 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Description": "Simple S3 Bucket",
+    "Parameters": {
+        "EnvType": {
+            "Description": "Environment type.",
+            "Default": "dev",
+            "Type": "String",
+            "AllowedValues": [
+                "prod",
+                "nonprod",
+                "dev"
+            ],
+            "ConstraintDescription": "must specify prod, nonprod, or dev."
+        },
+        "BucketNameString": {
+            "Type": "String",
+            "Description": "The name of the S3 Bucket to created nab-b2b- will be auto prepended",
+            "AllowedPattern": "^(?!.*--)[a-z]([a-z]|[a-z\\-]*[a-z])$",
+            "MinLength": "3",
+            "MaxLength": "49"
+        },
+        "ApplicationId": {
+            "Type": "String",
+            "Description": "Id of Application for which Bucket to be created"
+        },
+        "CostCentreId": {
+            "Type": "String",
+            "Description": "CostCentre for which Bucket to be created"
+        },
+        "KmKeyAdministratorsRoleName": {
+            "Type": "String",
+            "Description": "The RoleName which will be having Administrators Access to Bucket Key"
+        },
+        "AccountName": {
+            "Type": "String",
+            "Description": "Name Of the account",
+            "Default": "localnonprod",
+            "AllowedValues": [
+                "localnonprod",
+                "localprod"
+            ],
+            "ConstraintDescription": "must specify prod, nonprod, or dev."
+        }
+    },
+    "Resources": {
+        "ObjectArrivedTopic": {
+            "Type": "AWS::SNS::Topic",
+            "Properties": {
+                "DisplayName": "Obj-Arrived-SNS",
+                "TopicName": {
+                    "Fn::Join": [
+                        "-",
+                        [
+                            "S3-Obj-Arrived-SNS",
+                            {
+                                "Ref": "AccountName"
+                            }
+                        ]
+                    ]
+                }
+            }
+        },
+        "S3Bucket": {
+            "Type": "AWS::S3::Bucket",
+            "DeletionPolicy": "Retain",
+            "Properties": {
+                "BucketName": {
+                    "Fn::Join": [
+                        "-",
+                        [
+                            "nab",
+                            "b2b",
+                            {
+                                "Ref": "BucketNameString"
+                            },
+                            {
+                                "Ref": "EnvType"
+                            }
+                        ]
+                    ]
+                },
+                "AccessControl": "BucketOwnerFullControl",
+                "LifecycleConfiguration": {
+                    "Rules": [
+                        {
+                            "Id": "DeleteIncompleteMultipartInThreeDay",
+                            "Status": "Enabled",
+                            "Prefix": "",
+                            "AbortIncompleteMultipartUpload": {
+                                "DaysAfterInitiation": "3"
+                            }
+                        },
+                        {
+                            "Id": "DeleteEverythingInFiveDay",
+                            "Prefix": "",
+                            "Status": "Enabled",
+                            "ExpirationInDays": "5"
+                        }
+                    ]
+                },
+                "PublicAccessBlockConfiguration": {
+                    "BlockPublicAcls": true,
+                    "BlockPublicPolicy": true,
+                    "IgnorePublicAcls": true,
+                    "RestrictPublicBuckets": true
+                },
+                "BucketEncryption": {
+                    "ServerSideEncryptionConfiguration": [
+                        {
+                            "ServerSideEncryptionByDefault": {
+                                "SSEAlgorithm": "aws:kms",
+                                "KMSMasterKeyID": {
+                                    "Fn::GetAtt": [
+                                        "EncryptionKey",
+                                        "Arn"
+                                    ]
+                                }
+                            }
+                        }
+                    ]
+                },
+                "Tags": [
+                    {
+                        "Key": "ApplicationID",
+                        "Value": {
+                            "Ref": "ApplicationId"
+                        }
+                    },
+                    {
+                        "Key": "CostCentre",
+                        "Value": {
+                            "Ref": "CostCentreId"
+                        }
+                    }
+                ]
+            },
+            "DependsOn": "EncryptionKey"
+        },
+        "BucketPolicy": {
+            "Type": "AWS::S3::BucketPolicy",
+            "Properties": {
+                "Bucket": {
+                    "Ref": "S3Bucket"
+                },
+                "PolicyDocument": {
+                    "Statement": [
+                        {
+                            "Sid": "Restrict to Default- or KMS-encryption",
+                            "Effect": "Deny",
+                            "Principal": "*",
+                            "Action": "s3:PutObject",
+                            "Resource": {
+                                "Fn::Sub": [
+                                    "${BucketArn}/*",
+                                    {
+                                        "BucketArn": {
+                                            "Fn::GetAtt": [
+                                                "S3Bucket",
+                                                "Arn"
+                                            ]
+                                        }
+                                    }
+                                ]
+                            },
+                            "Condition": {
+                                "Null": {
+                                    "s3:x-amz-server-side-encryption": false
+                                },
+                                "StringNotEquals": {
+                                    "s3:x-amz-server-side-encryption": "aws:kms"
+                                }
+                            }
+                        },
+                        {
+                            "Sid": "AllowSSLRequestsOnly",
+                            "Action": "s3:*",
+                            "Effect": "Deny",
+                            "Resource": [
+                                {
+                                    "Fn::GetAtt": [
+                                        "S3Bucket",
+                                        "Arn"
+                                    ]
+                                },
+                                {
+                                    "Fn::Sub": "${S3Bucket.Arn}/*"
+                                }
+                            ],
+                            "Condition": {
+                                "Bool": {
+                                    "aws:SecureTransport": "false"
+                                }
+                            },
+                            "Principal": "*"
+                        },
+                        {
+                            "Sid": "DenyDelete",
+                            "Effect": "Deny",
+                            "Principal": "*",
+                            "Action": [
+                                "s3:DeleteBucket"
+                            ],
+                            "Resource": [
+                                {
+                                    "Fn::GetAtt": [
+                                        "S3Bucket",
+                                        "Arn"
+                                    ]
+                                }
+                            ]
+                        },
+                        {
+                            "Sid": "Restrict KMS-key",
+                            "Effect": "Deny",
+                            "Principal": "*",
+                            "Action": "s3:PutObject",
+                            "Resource": {
+                                "Fn::Sub": [
+                                    "${BucketArn}/*",
+                                    {
+                                        "BucketArn": {
+                                            "Fn::GetAtt": [
+                                                "S3Bucket",
+                                                "Arn"
+                                            ]
+                                        }
+                                    }
+                                ]
+                            },
+                            "Condition": {
+                                "StringNotEquals": {
+                                    "s3:x-amz-server-side-encryption": "aws:kms"
+                                },
+                                "StringNotEqualsIfExists": {
+                                    "s3:x-amz-server-side-encryption-aws-kms-key-id": {
+                                        "Fn::GetAtt": [
+                                            "EncryptionKey",
+                                            "Arn"
+                                        ]
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                }
+            },
+            "DependsOn": "S3Bucket"
+        },
+        "EncryptionKey": {
+            "Type": "AWS::KMS::Key",
+            "Properties": {
+                "Description": "For encrypting S3 Objects",
+                "Enabled": true,
+                "EnableKeyRotation": true,
+                "KeyPolicy": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Sid": "Enable IAM User Permissions",
+                            "Effect": "Allow",
+                            "Principal": {
+                                "AWS": {
+                                    "Fn::Sub": "arn:aws:iam::${AWS::AccountId}:root"
+                                }
+                            },
+                            "Action": "kms:*",
+                            "Resource": "*"
+                        },
+                        {
+                            "Sid": "Allow access for Key Administrators",
+                            "Effect": "Allow",
+                            "Principal": {
+                                "AWS": {
+                                    "Fn::Join": [
+                                        "",
+                                        [
+                                            "arn:aws:iam::",
+                                            {
+                                                "Ref": "AWS::AccountId"
+                                            },
+                                            ":role/",
+                                            {
+                                                "Ref": "KmKeyAdministratorsRoleName"
+                                            }
+                                        ]
+                                    ]
+                                }
+                            },
+                            "Action": [
+                                "kms:Create*",
+                                "kms:Describe*",
+                                "kms:Enable*",
+                                "kms:List*",
+                                "kms:Put*",
+                                "kms:Update*",
+                                "kms:Revoke*",
+                                "kms:Disable*",
+                                "kms:Get*",
+                                "kms:Delete*",
+                                "kms:TagResource",
+                                "kms:UntagResource",
+                                "kms:ScheduleKeyDeletion",
+                                "kms:CancelKeyDeletion"
+                            ],
+                            "Resource": "*"
+                        }
+                    ]
+                }
+            }
+        },
+        "EncryptionKeyAlias": {
+            "Type": "AWS::KMS::Alias",
+            "Properties": {
+                "AliasName": {
+                    "Fn::Join": [
+                        "-",
+                        [
+                            "alias/s3",
+                            {
+                                "Ref": "S3Bucket"
+                            },
+                            "kms-key"
+                        ]
+                    ]
+                },
+                "TargetKeyId": {
+                    "Ref": "EncryptionKey"
+                }
+            }
+        }
+    },
+    "Outputs": {
+        "EncryptionKey": {
+            "Description": "The key-id the newly created Bucket KMS Key",
+            "Value": {
+                "Fn::GetAtt": [
+                    "EncryptionKey",
+                    "Arn"
+                ]
+            }
+        },
+        "S3Bucket": {
+            "Description": "The ARN of the newly created Bucket",
+            "Value": {
+                "Fn::GetAtt": [
+                    "S3Bucket",
+                    "Arn"
+                ]
+            },
+            "Export": {
+                "Name": {
+                    "Fn::Sub": "${AWS::StackName}-BucketArn"
+                }
+            }
+        },
+        "S3BucketName": {
+            "Description": "The name of the newly created Bucket",
+            "Value": {
+                "Ref": "S3Bucket"
+            },
+            "Export": {
+                "Name": {
+                    "Fn::Sub": "${AWS::StackName}-BucketName"
+                }
+            }
+        },
+        "ObjectArrivedTopic": {
+            "Description": "The Name of the newly created SNS Topic",
+            "Value": {
+                "Fn::GetAtt": [
+                    "ObjectArrivedTopic",
+                    "TopicName"
+                ]
+            },
+            "Export": {
+                "Name": {
+                    "Fn::Sub": "${AWS::StackName}-TopicName"
+                }
+            }
+        },
+        "ObjectArrivedTopicArn": {
+            "Description": "The ARN of the newly created Bucket",
+            "Value": {
+                "Ref": "ObjectArrivedTopic"
+            },
+            "Export": {
+                "Name": {
+                    "Fn::Sub": "${AWS::StackName}-TopicArn"
+                }
+            }
+        }
+    }
+}
